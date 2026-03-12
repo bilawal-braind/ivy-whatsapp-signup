@@ -61,27 +61,19 @@ export default function App() {
   const [result,  setResult]  = useState(null);
 
   // These are refs (not state) because they're set inside event listeners
-  // and read inside the async fbLoginCallback — refs are always fresh.
-  const wabaIdRef  = useRef(null);
-  const phoneIdRef = useRef(null);
+  // and read inside the async exchangeToken — refs are always fresh.
+  const wabaIdRef      = useRef(null);
+  const phoneIdRef     = useRef(null);
+  const pendingCodeRef = useRef(null); // stores code if it arrives before WABA postMessage
 
-  // Called by FB.login callback AND by the /callback redirect message listener.
-  // Defined with useCallback so the effect dependency is stable.
-  // FB.login callback MUST be synchronous — async IIFE handles the async work inside
-  const fbLoginCallback = useCallback((response) => {
-    if (!response.authResponse) {
-      console.log('[ES] Popup closed without completing');
-      return;
-    }
-
-    const code = response.authResponse.code;
-    console.log('[ES] Got auth code, calling backend to exchange...');
-
+  // Core function: calls the backend and animates the result.
+  const exchangeToken = useCallback(async (code) => {
+    console.log('[ES] Exchanging token — WABA:', wabaIdRef.current, '| Phone:', phoneIdRef.current);
     setPhase('processing');
     setStep2('active');
     setStep3('wait');
 
-    (async () => { try {
+    try {
       const res = await fetch(`${API_URL}/api/exchange-token`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -93,6 +85,12 @@ export default function App() {
       });
 
       const data = await res.json();
+
+      if (res.status === 409 && data.error === 'already_connected') {
+        setPhase('idle');
+        alert('This WhatsApp Business Account is already connected to Ivy.\n\nIf you think this is a mistake, please contact support.');
+        return;
+      }
 
       if (!data.success) {
         const msg = data.error?.message || JSON.stringify(data.error) || 'Token exchange failed';
@@ -112,8 +110,45 @@ export default function App() {
       console.error('[ES] Error during token exchange:', err);
       setPhase('idle');
       alert('Setup failed: ' + err.message + '\n\nCheck the browser console for details.');
-    } })();
+    }
   }, []); // no deps — relies only on refs and stable setters
+
+  // Called by FB.login callback AND by the /callback redirect message listener.
+  // FB.login callback MUST be synchronous — we store the code and either
+  // proceed immediately (if WABA data already arrived) or wait for it.
+  const fbLoginCallback = useCallback((response) => {
+    if (!response.authResponse) {
+      console.log('[ES] Popup closed without completing');
+      return;
+    }
+
+    const code = response.authResponse.code;
+    console.log('[ES] Got auth code from FB SDK');
+
+    if (wabaIdRef.current) {
+      // WABA postMessage already arrived — proceed immediately
+      exchangeToken(code);
+    } else {
+      // postMessage hasn't arrived yet — store code and wait for it.
+      // The message handler below will call exchangeToken when it arrives.
+      console.log('[ES] Waiting for WA_EMBEDDED_SIGNUP message with WABA data...');
+      pendingCodeRef.current = code;
+
+      // Show the processing overlay while waiting
+      setPhase('processing');
+      setStep2('active');
+      setStep3('wait');
+
+      // Safety timeout: if WABA data never arrives after 6s, proceed anyway
+      setTimeout(() => {
+        if (pendingCodeRef.current === code) {
+          pendingCodeRef.current = null;
+          console.warn('[ES] Timeout waiting for WABA data — proceeding without it');
+          exchangeToken(code);
+        }
+      }, 6000);
+    }
+  }, [exchangeToken]);
 
   useEffect(() => {
     // Init FB SDK — fbAsyncInit must be set before the SDK script loads
@@ -163,6 +198,14 @@ export default function App() {
             wabaIdRef.current  = data.data.waba_id;
             phoneIdRef.current = data.data.phone_number_id;
             console.log('[ES] WABA:', wabaIdRef.current, '| Phone:', phoneIdRef.current);
+
+            // If fbLoginCallback already fired and is waiting, proceed now
+            if (pendingCodeRef.current) {
+              const pending      = pendingCodeRef.current;
+              pendingCodeRef.current = null;
+              console.log('[ES] WABA data arrived — proceeding with pending code');
+              exchangeToken(pending);
+            }
           } else if (data.event === 'CANCEL') {
             console.warn('[ES] User cancelled at step:', data.data.current_step);
           } else if (data.event === 'ERROR') {
@@ -176,12 +219,13 @@ export default function App() {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [fbLoginCallback]);
+  }, [fbLoginCallback, exchangeToken]);
 
   // Fires the real Meta Embedded Signup popup — do not change config_id or params
   const launchWhatsAppSignup = () => {
-    wabaIdRef.current  = null;
-    phoneIdRef.current = null;
+    wabaIdRef.current      = null;
+    phoneIdRef.current     = null;
+    pendingCodeRef.current = null;
 
     window.FB.login(fbLoginCallback, {
       config_id:                      '933321519187569',
