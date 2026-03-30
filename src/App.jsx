@@ -62,9 +62,10 @@ export default function App() {
 
   // These are refs (not state) because they're set inside event listeners
   // and read inside the async exchangeToken — refs are always fresh.
-  const wabaIdRef      = useRef(null);
-  const phoneIdRef     = useRef(null);
-  const pendingCodeRef = useRef(null); // stores code if it arrives before WABA postMessage
+  const wabaIdRef        = useRef(null);
+  const phoneIdRef       = useRef(null);
+  const pendingCodeRef   = useRef(null); // stores code if it arrives before WABA postMessage
+  const isCoexistenceRef = useRef(false); // true when user completed via WhatsApp Business App flow
 
   // Core function: calls the backend and animates the result.
   const exchangeToken = useCallback(async (code) => {
@@ -81,6 +82,7 @@ export default function App() {
           code,
           waba_id:         wabaIdRef.current,
           phone_number_id: phoneIdRef.current,
+          is_coexistence:  isCoexistenceRef.current,
         }),
       });
 
@@ -194,10 +196,11 @@ export default function App() {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'WA_EMBEDDED_SIGNUP') {
-          if (data.event === 'FINISH' || data.event === 'FINISH_ONLY_WABA') {
-            wabaIdRef.current  = data.data.waba_id;
-            phoneIdRef.current = data.data.phone_number_id;
-            console.log('[ES] WABA:', wabaIdRef.current, '| Phone:', phoneIdRef.current);
+          if (data.event === 'FINISH' || data.event === 'FINISH_ONLY_WABA' || data.event === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING') {
+            wabaIdRef.current        = data.data.waba_id;
+            phoneIdRef.current       = data.data.phone_number_id;
+            isCoexistenceRef.current = data.event === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING';
+            console.log('[ES] WABA:', wabaIdRef.current, '| Phone:', phoneIdRef.current, '| Coexistence:', isCoexistenceRef.current);
 
             // If fbLoginCallback already fired and is waiting, proceed now
             if (pendingCodeRef.current) {
@@ -223,15 +226,20 @@ export default function App() {
 
   // Fires the real Meta Embedded Signup popup — do not change config_id or params
   const launchWhatsAppSignup = () => {
-    wabaIdRef.current      = null;
-    phoneIdRef.current     = null;
-    pendingCodeRef.current = null;
+    wabaIdRef.current        = null;
+    phoneIdRef.current       = null;
+    pendingCodeRef.current   = null;
+    isCoexistenceRef.current = false;
 
     window.FB.login(fbLoginCallback, {
       config_id:                      '933321519187569',
       response_type:                  'code',
       override_default_response_type: true,
-      extras: { setup: {} },
+      extras: {
+        setup:              {},
+        featureType:        'whatsapp_business_app_onboarding',
+        sessionInfoVersion: '3',
+      },
     });
   };
 
